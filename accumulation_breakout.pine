@@ -1,0 +1,127 @@
+//@version=6
+strategy("Accumulation Breakout", shorttitle = "AccBO", overlay = true,
+     max_boxes_count = 500, max_lines_count = 500,
+     initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10,
+     commission_type = strategy.commission.percent, commission_value = 0.05)
+
+// ─────────────────────────────── Paramètres ───────────────────────────────
+grpZ      = "Zone d'accumulation"
+minBars   = input.int(10, "Bougies minimum dans la zone", minval = 3, group = grpZ)
+maxBars   = input.int(80, "Durée max de la zone (bougies)", minval = 5, group = grpZ)
+atrLen    = input.int(50, "Période ATR", minval = 1, group = grpZ)
+maxHeight = input.float(3.0, "Hauteur max de la zone (x ATR)", minval = 0.5, step = 0.1, group = grpZ)
+breakBuf  = input.float(0.1, "Marge de cassure (x ATR)", minval = 0, step = 0.05, group = grpZ,
+     tooltip = "La clôture doit dépasser le bord de la zone d'au moins cette marge")
+
+grpF     = "Filtres"
+tradeDir = input.string("Long & Short", "Direction", options = ["Long & Short", "Long seulement", "Short seulement"], group = grpF)
+useVol   = input.bool(false, "Volume de cassure > moyenne", group = grpF)
+volMult  = input.float(1.2, "Multiplicateur volume", step = 0.1, group = grpF)
+useTrend = input.bool(false, "Filtre tendance (EMA)", group = grpF)
+emaLen   = input.int(200, "Période EMA", group = grpF)
+
+grpR   = "Gestion du risque"
+slMode = input.string("Bord opposé", "Stop loss", options = ["Bord opposé", "Milieu de zone"], group = grpR)
+slBuf  = input.float(0.2, "Marge SL (x ATR)", minval = 0, step = 0.05, group = grpR)
+tpMode = input.string("Ratio R:R", "Take profit", options = ["Ratio R:R", "Hauteur de zone"], group = grpR)
+rr     = input.float(2.0, "Ratio R:R", minval = 0.5, step = 0.1, group = grpR)
+mmMult = input.float(1.0, "Multiplicateur hauteur de zone", minval = 0.5, step = 0.1, group = grpR,
+     tooltip = "TP = bord cassé + hauteur de zone x multiplicateur")
+
+grpV      = "Affichage"
+colZone   = input.color(color.new(#7E57C2, 75), "Zone active", group = grpV)
+colBorder = input.color(#7E57C2, "Bordure", group = grpV)
+colUp     = input.color(color.new(color.teal, 75), "Zone cassée à la hausse", group = grpV)
+colDn     = input.color(color.new(color.red, 75), "Zone cassée à la baisse", group = grpV)
+colDead   = input.color(color.new(color.gray, 85), "Zone expirée", group = grpV)
+
+// ─────────────────────────────── Calculs ───────────────────────────────
+atr = ta.atr(atrLen)
+hh  = ta.highest(high, minBars)
+ll  = ta.lowest(low, minBars)
+
+var bool  zActive = false
+var float zTop    = na
+var float zBot    = na
+var int   zStart  = na
+var int   lastEnd = -1
+var box   zBox    = na
+var line  zMid    = na
+
+bool  longBreak  = false
+bool  shortBreak = false
+float brkTop     = na
+float brkBot     = na
+
+// Suivi de la zone active : cassure, extension ou expiration
+if zActive
+    buf = breakBuf * atr
+    if close > zTop + buf or close < zBot - buf
+        longBreak  := close > zTop
+        shortBreak := not longBreak
+        brkTop     := zTop
+        brkBot     := zBot
+        zActive    := false
+        lastEnd    := bar_index
+        box.set_bgcolor(zBox, longBreak ? colUp : colDn)
+        box.set_border_color(zBox, longBreak ? color.teal : color.red)
+    else
+        // Mèche hors zone mais clôture dedans : on agrandit la zone si elle reste compacte
+        newTop = math.max(zTop, high)
+        newBot = math.min(zBot, low)
+        if newTop - newBot <= maxHeight * atr
+            zTop := newTop
+            zBot := newBot
+        box.set_top(zBox, zTop)
+        box.set_bottom(zBox, zBot)
+        box.set_right(zBox, bar_index)
+        line.set_xy1(zMid, zStart, (zTop + zBot) / 2)
+        line.set_xy2(zMid, bar_index, (zTop + zBot) / 2)
+        if bar_index - zStart >= maxBars
+            zActive := false
+            lastEnd := bar_index
+            box.set_bgcolor(zBox, colDead)
+            box.set_border_color(zBox, color.gray)
+
+// Détection d'une nouvelle zone : N dernières bougies dans un range étroit
+if not zActive and bar_index >= minBars
+    start = bar_index - minBars + 1
+    if start > lastEnd and hh - ll <= maxHeight * atr
+        zActive := true
+        zTop    := hh
+        zBot    := ll
+        zStart  := start
+        zBox    := box.new(zStart, zTop, bar_index, zBot, border_color = colBorder, border_width = 2, bgcolor = colZone)
+        zMid    := line.new(zStart, (zTop + zBot) / 2, bar_index, (zTop + zBot) / 2, color = color.navy, style = line.style_dashed)
+
+// ─────────────────────────────── Filtres ───────────────────────────────
+volOk   = not useVol or volume > ta.sma(volume, 20) * volMult
+ema     = ta.ema(close, emaLen)
+longOk  = longBreak  and volOk and (not useTrend or close > ema) and tradeDir != "Short seulement"
+shortOk = shortBreak and volOk and (not useTrend or close < ema) and tradeDir != "Long seulement"
+
+// ─────────────────────────────── Ordres ───────────────────────────────
+var float slLvl = na
+var float tpLvl = na
+
+if longOk and strategy.position_size <= 0
+    slLvl := (slMode == "Bord opposé" ? brkBot : (brkTop + brkBot) / 2) - slBuf * atr
+    tpLvl := tpMode == "Ratio R:R" ? close + rr * (close - slLvl) : brkTop + mmMult * (brkTop - brkBot)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Sortie Long", from_entry = "Long", stop = slLvl, limit = tpLvl)
+    alert("Cassure HAUSSIÈRE de la zone d'accumulation sur " + syminfo.ticker + " | SL " + str.tostring(slLvl, format.mintick) + " | TP " + str.tostring(tpLvl, format.mintick), alert.freq_once_per_bar_close)
+
+if shortOk and strategy.position_size >= 0
+    slLvl := (slMode == "Bord opposé" ? brkTop : (brkTop + brkBot) / 2) + slBuf * atr
+    tpLvl := tpMode == "Ratio R:R" ? close - rr * (slLvl - close) : brkBot - mmMult * (brkTop - brkBot)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Sortie Short", from_entry = "Short", stop = slLvl, limit = tpLvl)
+    alert("Cassure BAISSIÈRE de la zone d'accumulation sur " + syminfo.ticker + " | SL " + str.tostring(slLvl, format.mintick) + " | TP " + str.tostring(tpLvl, format.mintick), alert.freq_once_per_bar_close)
+
+// ─────────────────────────────── Visuels ───────────────────────────────
+inPos = strategy.position_size != 0
+plot(inPos ? slLvl : na, "Stop loss", color.red, 1, plot.style_linebr)
+plot(inPos ? tpLvl : na, "Take profit", color.teal, 1, plot.style_linebr)
+plot(useTrend ? ema : na, "EMA", color.orange)
+plotshape(longOk, "Achat", shape.triangleup, location.belowbar, color.teal, size = size.small, text = "BUY", textcolor = color.teal)
+plotshape(shortOk, "Vente", shape.triangledown, location.abovebar, color.red, size = size.small, text = "SELL", textcolor = color.red)
