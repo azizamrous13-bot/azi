@@ -1,0 +1,1205 @@
+//@version=6
+// AccBO Analyse v2 + XAU zones majeures (OB + FVG des UT supérieures, ajout 2026-11-12, non testé).
+// Indicateur d'aide à la lecture, tout sur le graphique des prix (aucun ordre).
+// Partie oscillateur : « Volume Delta Oscillator with Divergence Signals » © BigBeluga, sous licence
+// Creative Commons BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/) : usage non commercial, même licence
+// pour ce script dérivé. Oscillateur réutilisé, affichage modifié.
+// Compilation non vérifiée ici.
+indicator("AccBO Analyse", shorttitle = "AccBO Analyse", overlay = false, max_boxes_count = 500, max_lines_count = 500,
+     max_labels_count = 500, max_polylines_count = 100)
+
+// ─────────────────────────────── Paramètres ───────────────────────────────
+grpZ      = "Zone"
+zoneSrc   = input.string("Mèches", "Construction de zone", options = ["Mèches", "Corps"], group = grpZ)
+minBars   = input.int(10, "Bougies minimum", minval = 3, group = grpZ)
+maxBars   = input.int(80, "Durée maximale (bougies)", minval = 5, group = grpZ)
+maxHeight = input.float(3.0, "Hauteur maximale (x ATR 50)", minval = 0.5, step = 0.1, group = grpZ)
+breakBuf  = input.float(0.1, "Marge de cassure (x ATR)", minval = 0, step = 0.05, group = grpZ)
+confirm2  = input.bool(true, "Confirmation : 2 clôtures", group = grpZ)
+stopMode  = input.string("Bord opposé", "Stop initial", options = ["Bord opposé", "Milieu de zone"], group = grpZ)
+
+grpF      = "Filtres des trades virtuels"
+emaOnly   = input.bool(false, "Seulement avec EMA 50/200 alignées (≡)", group = grpF)
+sessOnly  = input.bool(false, "Seulement pendant la séance", group = grpF)
+closedFloor = input.bool(true, "Ignorer les zones de marché fermé", group = grpF)
+
+grpT      = "Tendance 1 / 3 / 12 mois"
+showTrend = false   // points de tendance et luminosité retirés (demande du trader)
+trendOnly = input.bool(false, "Trades seulement dans la tendance", group = grpT)
+
+grpS      = "Sortie"
+exitMode  = input.string("Stop suiveur", "Sortie", options = ["Stop suiveur", "Objectif fixe (R)", "Moitié à l'objectif puis suiveur"], group = grpS)
+tpR       = input.float(2.0, "Objectif (R)", minval = 0.5, step = 0.5, group = grpS)
+trailMult = input.float(4.0, "Stop suiveur : distance (x ATR 50)", minval = 0.5, step = 0.5, group = grpS)
+showHist  = input.bool(true, "Afficher les trades fermés", group = grpS)
+
+grpM    = "Moyennes mobiles"
+maType  = input.string("EMA", "Type", options = ["EMA", "SMA"], group = grpM)
+ma1Len  = input.int(50, "Moyenne 1", minval = 1, group = grpM, inline = "m1")
+showMa1 = input.bool(true, "", group = grpM, inline = "m1")
+ma2Len  = input.int(200, "Moyenne 2", minval = 1, group = grpM, inline = "m2")
+showMa2 = input.bool(true, "", group = grpM, inline = "m2")
+maCloud = input.bool(false, "Nuage entre les moyennes", group = grpM)
+
+grpR        = "Retournement (oscillateur BigBeluga)"
+deltaPeriod = 14
+smoothLen = 5
+pivLeft = 7
+pivRight = 2
+exhLevel = 100.0
+minForce = 1
+maxGap = 0
+vigil = 20
+showDiv     = input.bool(true, "Triangles de divergence", group = grpR)
+showDivLine = input.bool(true, "Trait entre les deux sommets (ou creux)", group = grpR)
+showExh     = input.bool(true, "Points d'essoufflement (à la clôture)", group = grpR)
+showCross   = input.bool(false, "Points à chaque croisement (gris)", group = grpR)
+showRibbon  = input.bool(true, "Ruban de pression en bas du graphique", group = grpR)
+warnTrades = false
+
+grpW      = "Murs de retournement (idée du trader, sans réaction mesurée)"
+showWalls = input.bool(false, "Murs sur les divergences", group = grpW)
+wallMode  = input.string("Mèche → corps", "Épaisseur du mur", options = ["Mèche → corps", "± ATR autour de l'extrême"], group = grpW)
+wallAtrK  = input.float(0.25, "Demi-épaisseur en mode ± ATR (x ATR 50)", minval = 0.05, step = 0.05, group = grpW)
+wallMax   = input.int(8, "Murs actifs au maximum", minval = 1, maxval = 50, group = grpW)
+wallLife  = input.int(300, "Durée de vie d'un mur (bougies)", minval = 10, group = grpW)
+keepDead  = input.bool(true, "Garder les murs cassés ou expirés (estompés)", group = grpW)
+wallTP    = input.bool(false, "Objectif « TP mur » sur les trades ouverts", group = grpW)
+wallCue   = input.bool(false, "Repères sur les cassures : ▣ appui · ⊠ mur traversé · ⚠ mur devant", group = grpW)
+grpPD     = "Plus haut / bas de la veille (aimants à cassure)"
+showPD    = input.bool(false, "Lignes de la veille et de la semaine précédente", group = grpPD)
+pdHist    = input.bool(false, "Garder l'historique (marches sur tout le graphique)", group = grpPD)
+aheadR    = input.float(1.0, "⚠ si un mur est à moins de (x R)", minval = 0.1, step = 0.1, group = grpW)
+
+grpD      = "Direction : lignes de tendance, structure (aide visuelle, sans effet mesuré)"
+showTL    = input.bool(true, "Lignes de tendance automatiques", group = grpD)
+tlLen     = input.int(10, "Pivots des lignes : bougies de chaque côté", minval = 2, group = grpD)
+tlMax     = input.int(3, "Lignes actives par côté", minval = 1, maxval = 10, group = grpD)
+tlKeep    = input.int(4, "Lignes cassées gardées par côté", minval = 0, maxval = 20, group = grpD)
+chPiv     = input.int(20, "Grands pivots (structure) : bougies de chaque côté", minval = 3, group = grpD)
+showStruct = input.bool(true, "Étiquettes de structure (HH · HL · LH · LL) sur les grands pivots", group = grpD)
+colDir    = input.color(#E2E8F0, "Couleur des lignes", group = grpD)
+
+grpV       = "Affichage"
+candleMode = input.string("Zone et cassure", "Couleur des bougies", options = ["Natives", "Zone et cassure", "Palette AccBO", "Pression (oscillateur)"],
+     group = grpV)
+colUp      = input.color(#1FC7A6, "Haussier", group = grpV)
+colDn      = input.color(#FF5C7A, "Baissier", group = grpV)
+colZ       = input.color(#8B7CF6, "Zone en formation", group = grpV)
+colAcc     = input.color(#F5B841, "Attention / retournement", group = grpV)
+colMa1     = input.color(#F5C26B, "Moyenne 1", group = grpV)
+colMa2     = input.color(#94A3B8, "Moyenne 2", group = grpV)
+showPanel  = input.bool(true, "Panneau", group = grpV)
+panelPos   = input.string("En haut à droite", "Position du panneau", options = ["En haut à droite", "En bas à droite", "En haut à gauche", "En bas à gauche"], group = grpV)
+tSize      = input.string("Petite", "Taille du texte", options = ["Petite", "Normale", "Grande"], group = grpV)
+zoneVis    = input.string("Forte", "Visibilité des zones", options = ["Forte", "Moyenne", "Discrète (avant)"], group = grpV)
+
+grpX  = "XAU zones majeures (OB + FVG, UT supérieures)"
+showX = input.bool(true, "Afficher les zones majeures", group = grpX)
+xTf1  = input.timeframe("240", "UT majeure 1", group = grpX)
+xTf2  = input.timeframe("D", "UT majeure 2", group = grpX)
+xSw   = input.int(10, "Swing majeur : bougies de chaque côté", minval = 2, maxval = 50, group = grpX)
+xFvg  = input.bool(true, "Inclure les FVG", group = grpX)
+xExp  = input.int(300, "Expiration (bougies de l'UT)", minval = 10, group = grpX)
+xMid  = input.bool(true, "Ligne des 50 %", group = grpX)
+
+txt    = tSize == "Petite" ? size.small : tSize == "Grande" ? size.large : size.normal
+SL_BUF = 0.2
+
+// ─────────────────────────────── Réglages effectifs (manuels) ───────────────────────────────
+string tkU    = str.upper(syminfo.ticker)
+string mktKey = str.contains(tkU, "XAU") or str.contains(tkU, "GOLD") ? "XAUUSD" :
+     str.contains(tkU, "NAS") or str.contains(tkU, "US100") or str.contains(tkU, "NDX") or str.contains(tkU, "USTEC") or str.contains(tkU, "NQ") ? "NAS100" :
+     str.contains(tkU, "BTC") ? "BTCUSD" : syminfo.basecurrency + syminfo.currency
+int    tfSec  = timeframe.in_seconds()
+string tfKey  = tfSec == 60 ? "M1" : tfSec == 180 ? "M3" : tfSec == 900 ? "M15" : tfSec == 1800 ? "M30" : tfSec == 2700 ? "M45" :
+     tfSec == 3600 ? "H1" : tfSec == 14400 ? "H4" : tfSec == 86400 ? "D1" : tfSec == 604800 ? "W1" : "?"
+int    minBarsE   = minBars
+float  maxHeightE = maxHeight
+float  breakBufE  = breakBuf
+bool   confirm2E  = confirm2
+bool   stopMidE   = stopMode == "Milieu de zone"
+int    exitModeE  = exitMode == "Objectif fixe (R)" ? 1 : exitMode == "Moitié à l'objectif puis suiveur" ? 2 : 0
+float  tpRE       = tpR
+float  trailE     = trailMult
+bool   emaOnlyE   = emaOnly
+bool   sessOnlyE  = sessOnly
+string zoneSrcE   = zoneSrc
+int    maxBarsE   = maxBars
+bool   trendOnlyE = trendOnly
+bool   closedFloorE = closedFloor
+bool   sessApplies = tfSec <= 3600 and mktKey != "BTCUSD"
+string sessStr     = mktKey == "NAS100" ? "0930-1600" : "0300-1600"
+bool   inSess      = not sessApplies or not na(time(timeframe.period, sessStr, "America/New_York"))
+exitName(int m) => m == 1 ? "objectif " + str.tostring(tpRE, "#.#") + " R" : m == 2 ? "moitié à " + str.tostring(tpRE, "#.#") + " R puis suiveur " + str.tostring(trailE, "#.#") + " ATR" : "suiveur " + str.tostring(trailE, "#.#") + " ATR"
+NEUTRE = #94A3B8
+bool isDark = (color.r(chart.bg_color) + color.g(chart.bg_color) + color.b(chart.bg_color)) / 3 < 128
+color upTxt  = isDark ? colUp : color.from_gradient(45, 0, 100, colUp, #000000)
+color dnTxt  = isDark ? colDn : color.from_gradient(35, 0, 100, colDn, #000000)
+color accTxt = isDark ? colAcc : color.from_gradient(50, 0, 100, colAcc, #000000)
+color zTxt   = isDark ? colZ : color.from_gradient(30, 0, 100, colZ, #000000)
+
+// ─────────────────────────────── Tendance 1 / 3 / 12 mois ───────────────────────────────
+trendSigns() => [math.sign(close[1] - close[22]), math.sign(close[1] - close[64]), math.sign(close[1] - close[253])]
+[d1, d2, d3] = request.security(syminfo.tickerid, "D", trendSigns(), lookahead = barmerge.lookahead_on)
+bool htf = timeframe.isweekly or timeframe.ismonthly
+int  b1  = timeframe.ismonthly ? 1 : 4
+int  b2  = timeframe.ismonthly ? 3 : 13
+int  b3  = timeframe.ismonthly ? 12 : 52
+float c1 = math.sign(close[1] - close[1 + b1])
+float c2 = math.sign(close[1] - close[1 + b2])
+float c3 = math.sign(close[1] - close[1 + b3])
+float t1 = htf ? c1 : d1
+float t2 = htf ? c2 : d2
+float t3 = htf ? c3 : d3
+float tScore = (t1 + t2 + t3) / 3
+
+arrow(float x) => na(x) ? "·" : x > 0 ? "↑" : x < 0 ? "↓" : "→"
+dot(float x) => na(x) ? "·" : x > 0 ? "●" : x < 0 ? "○" : "·"
+scoreTxt(float x) => na(x) ? "historique court" : x > 0.5 ? "+1" : x > 0 ? "+1/3" : x == 0 ? "0" : x > -0.5 ? "−1/3" : "−1"
+dotsFor(int dir) => dot(t1 * dir) + dot(t2 * dir) + dot(t3 * dir)
+agree(int dir) =>
+    int a = na
+    if not na(tScore)
+        a := (t1 * dir > 0 ? 1 : 0) + (t2 * dir > 0 ? 1 : 0) + (t3 * dir > 0 ? 1 : 0)
+    a
+fondTr(int f) => na(f) ? 80 : f >= 4 ? 66 : f == 3 ? 70 : f == 2 ? 74 : f == 1 ? 78 : 82
+bordTr(int f) => na(f) ? 25 : f >= 4 ? 0 : f == 3 ? 10 : f == 2 ? 20 : f == 1 ? 32 : 45
+vis(int tr) => tr > 50 ? math.round(50 + (tr - 50) * (zoneVis == "Forte" ? 0.6 : zoneVis == "Moyenne" ? 0.8 : 1.0)) : tr
+
+// ─────────────────────────────── Moyennes mobiles ───────────────────────────────
+e1 = ta.ema(close, ma1Len)
+s1 = ta.sma(close, ma1Len)
+e2 = ta.ema(close, ma2Len)
+s2 = ta.sma(close, ma2Len)
+ma1 = maType == "EMA" ? e1 : s1
+ma2 = maType == "EMA" ? e2 : s2
+pMa1 = plot(showMa1 ? ma1 : na, "Moyenne 1", color.new(isDark ? colMa1 : color.from_gradient(40, 0, 100, colMa1, #000000), 20), 1, force_overlay = true)
+pMa2 = plot(showMa2 ? ma2 : na, "Moyenne 2", color.new(colMa2, 35), 2, force_overlay = true)
+
+[pdH, pdL] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[pwH, pwL] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+bool pdOk = showPD and timeframe.isintraday
+bool pwOk = showPD and not timeframe.isweekly and not timeframe.ismonthly
+plot(pdOk and pdHist ? pdH : na, "Plus haut de la veille", color.new(colAcc, 55), 1, plot.style_stepline, force_overlay = true)
+plot(pdOk and pdHist ? pdL : na, "Plus bas de la veille", color.new(colAcc, 55), 1, plot.style_stepline, force_overlay = true)
+plot(pwOk and pdHist ? pwH : na, "Plus haut de la semaine précédente", color.new(colAcc, 70), 1, plot.style_stepline, force_overlay = true)
+plot(pwOk and pdHist ? pwL : na, "Plus bas de la semaine précédente", color.new(colAcc, 70), 1, plot.style_stepline, force_overlay = true)
+
+var int dStart = na
+var int wStart = na
+if timeframe.change("D")
+    dStart := bar_index
+if timeframe.change("W")
+    wStart := bar_index
+var array<line>  pdLn = array.new<line>()
+var array<label> pdLb = array.new<label>()
+pdLevel(int x0, float y, string name, int tr, string st) =>
+    if not na(y)
+        array.push(pdLn, line.new(x0, y, bar_index + 6, y, color = color.new(colAcc, tr), width = 1, style = st, force_overlay = true))
+        array.push(pdLb, label.new(bar_index + 6, y, name + " " + str.tostring(y, format.mintick), style = label.style_label_left,
+             color = color.new(color.black, 100), textcolor = color.new(accTxt, tr), size = size.tiny, force_overlay = true))
+if barstate.islast
+    for x in pdLn
+        line.delete(x)
+    for x in pdLb
+        label.delete(x)
+    array.clear(pdLn)
+    array.clear(pdLb)
+    if pdOk
+        pdLevel(nz(dStart, bar_index), pdH, "veille ▲", 15, line.style_solid)
+        pdLevel(nz(dStart, bar_index), pdL, "veille ▼", 15, line.style_solid)
+    if pwOk
+        pdLevel(nz(wStart, bar_index), pwH, "sem. ▲", 35, line.style_dashed)
+        pdLevel(nz(wStart, bar_index), pwL, "sem. ▼", 35, line.style_dashed)
+fill(pMa1, pMa2, color = maCloud and showMa1 and showMa2 ? (ma1 > ma2 ? color.new(colUp, 93) : color.new(colDn, 93)) : na, title = "Nuage entre les moyennes")
+
+atr = ta.atr(50)
+atrMed = ta.percentile_nearest_rank(atr, math.max(1, math.min(1000, bar_index - 48)), 50)
+bool okFloor = not closedFloorE or (not na(atr) and not na(atrMed) and atr >= 0.25 * atrMed)
+cueE50  = ta.ema(close, ma1Len)
+cueE200 = ta.ema(close, ma2Len)
+emaAligned(int dir) => dir == 1 ? close > cueE50 and cueE50 > cueE200 : close < cueE50 and cueE50 < cueE200
+okDecide(int dir) => (not emaOnlyE or emaAligned(dir)) and (not sessOnlyE or inSess)
+
+// ─────────────────────────────── Oscillateur BigBeluga ───────────────────────────────
+clamp(float val, float lo, float hi) => math.min(hi, math.max(lo, val))
+float bodyRatio  = math.abs(close - open) / math.max(high - low, syminfo.mintick)
+float deltaRatio = clamp((close >= open ? 1.0 : -1.0) * bodyRatio * 50.0, -50.0, 50.0)
+float emaScale   = (2.0 / 15) / (2.0 / (deltaPeriod + 1)) * 10.0
+float osc        = ta.ema(deltaRatio, deltaPeriod) * emaScale
+max_bars_back(osc, 500)
+float signalLine = ta.wma(osc, smoothLen)
+showOscP = input.bool(true, "Oscillateur dans un panneau sous le graphique", group = grpR)
+hOT = hline(exhLevel * 2, "Osc haut", color = color.new(colDn, 100), display = showOscP ? display.all : display.none)
+hOU = hline(exhLevel, "Osc extrême haut", color = color.new(colDn, 40), display = showOscP ? display.all : display.none)
+hline(0, "Osc zéro", color = color.new(NEUTRE, 50), linestyle = hline.style_dashed, display = showOscP ? display.all : display.none)
+hOD = hline(-exhLevel, "Osc extrême bas", color = color.new(colUp, 40), display = showOscP ? display.all : display.none)
+hOB = hline(-exhLevel * 2, "Osc bas", color = color.new(colUp, 100), display = showOscP ? display.all : display.none)
+fill(hOT, hOU, color = showOscP ? color.new(colDn, 85) : na)
+fill(hOD, hOB, color = showOscP ? color.new(colUp, 85) : na)
+plot(showOscP ? deltaRatio : na, "Pression (panneau)", style = plot.style_columns, color = deltaRatio >= 0 ? color.new(colUp, 55) : color.new(colDn, 55))
+plot(showOscP ? signalLine : na, "Ligne de signal", color = colAcc, linewidth = 1)
+plot(showOscP ? osc : na, "Oscillateur BigBeluga", color = isDark ? #E5E7EB : #111827, linewidth = 2)
+
+bool xDn    = ta.crossunder(osc, signalLine)
+bool xUp    = ta.crossover(osc, signalLine)
+bool exhTop = barstate.isconfirmed and nz(osc[1]) >= exhLevel and xDn
+bool exhBot = barstate.isconfirmed and nz(osc[1]) <= -exhLevel and xUp
+var int lastExhBar = na
+var int lastExhDir = 0
+if exhTop
+    lastExhBar := bar_index
+    lastExhDir := -1
+if exhBot
+    lastExhBar := bar_index
+    lastExhDir := 1
+
+float ph = ta.pivothigh(osc, pivLeft, pivRight)
+float pl = ta.pivotlow(osc, pivLeft, pivRight)
+var float prevPhOsc = na
+var float prevPhPrice = na
+var int   prevPhIdx = na
+var float prevPlOsc = na
+var float prevPlPrice = na
+var int   prevPlIdx = na
+bool bearDiv = false
+bool bullDiv = false
+pivIdx = bar_index - pivRight
+
+var int   lastBearBar   = na
+var float lastBearPx    = na
+var int   lastBearForce = 0
+var bool  bearValid     = false
+var int   lastBullBar   = na
+var float lastBullPx    = na
+var int   lastBullForce = 0
+var bool  bullValid     = false
+
+diamonds(int f) => f >= 3 ? "◆◆◆" : f == 2 ? "◆◆◇" : "◆◇◇"
+
+// ─────────────────────────────── Murs de retournement ───────────────────────────────
+type Wall
+    box   bx
+    float top
+    float bot
+    int   dir
+    int   born
+    int   hits = 0
+
+var array<Wall> walls = array.new<Wall>()
+
+wallName(int dir) => dir == 1 ? "mur ▲" : "mur ▼"
+
+retireWall(int i, string why) =>
+    Wall w = array.get(walls, i)
+    color c = w.dir == 1 ? colUp : colDn
+    if keepDead
+        box.set_right(w.bx, bar_index)
+        box.set_bgcolor(w.bx, color.new(c, vis(96)))
+        box.set_border_color(w.bx, color.new(c, vis(85)))
+        box.set_border_style(w.bx, line.style_dotted)
+        box.set_text(w.bx, wallName(w.dir) + " " + why)
+        box.set_text_color(w.bx, color.new(c, vis(70)))
+    else
+        box.delete(w.bx)
+    array.remove(walls, i)
+
+addWall(int x, float wick, float body, int dir) =>
+    if not na(atr)
+        float top = na
+        float bot = na
+        if wallMode == "Mèche → corps"
+            top := dir == -1 ? wick : math.max(body, wick + 0.1 * atr)
+            bot := dir == -1 ? math.min(body, wick - 0.1 * atr) : wick
+        else
+            top := wick + wallAtrK * atr
+            bot := wick - wallAtrK * atr
+        color c = dir == 1 ? colUp : colDn
+        box b = box.new(x, top, bar_index, bot, border_color = color.new(c, 55), border_width = 1, bgcolor = color.new(c, vis(88)),
+             text = wallName(dir), text_size = size.tiny, text_color = color.new(dir == 1 ? upTxt : dnTxt, 35),
+             text_halign = text.align_right, text_valign = text.align_center, force_overlay = true)
+        array.push(walls, Wall.new(b, top, bot, dir, bar_index))
+        while array.size(walls) > wallMax
+            retireWall(0, "figé")
+
+nearestAhead(int dir, float px0) =>
+    float best = na
+    for w in walls
+        if w.dir == -dir
+            float e = dir == 1 ? w.bot : w.top
+            if (e - px0) * dir > 0 and (na(best) or (e - best) * dir < 0)
+                best := e
+    best
+
+zoneWallBias(float zt, float zb) =>
+    float mid = (zt + zb) / 2
+    bool sup = false
+    bool res = false
+    for w in walls
+        if w.dir == 1 and w.top >= zb - 0.5 * atr and w.top <= mid
+            sup := true
+        if w.dir == -1 and w.bot <= zt + 0.5 * atr and w.bot >= mid
+            res := true
+    sup and not res ? 1 : res and not sup ? -1 : 0
+ATLAS_DIV = "\nAtlas : l'oscillateur mesure la forme des bougies (le volume s'annule). Une cassure qui part contre une divergence active a fait MIEUX (+0,05 R, ACCBO-CUES) et sortir sur divergence n'a pas aidé : information de lecture, pas un signal de retournement fiable."
+
+if not na(ph)
+    pxH = high[pivRight]
+    if not na(prevPhOsc) and ph < prevPhOsc and pxH > prevPhPrice and close <= pxH and (maxGap == 0 or pivIdx - prevPhIdx <= maxGap)
+        int dvF = 1 + (ph >= exhLevel ? 1 : 0) + (osc < signalLine ? 1 : 0)
+        if dvF >= minForce
+            bearDiv       := true
+            lastBearBar   := bar_index
+            lastBearPx    := pxH
+            lastBearForce := dvF
+            bearValid     := true
+            if showDiv
+                label.new(pivIdx, pxH, "", yloc = yloc.abovebar, style = label.style_triangledown,
+                     size = dvF == 3 ? size.small : size.tiny, color = color.new(colDn, dvF == 1 ? 50 : dvF == 2 ? 15 : 0),
+                     tooltip = "Divergence baissière " + diamonds(dvF) + "\nSommet de prix plus haut (" + str.tostring(pxH, format.mintick) +
+                     " > " + str.tostring(prevPhPrice, format.mintick) + ") mais oscillateur plus bas.\nConfirmée " + str.tostring(pivRight) +
+                     " bougies après ce sommet : pas de repeint.\nInvalide si une clôture dépasse " + str.tostring(pxH, format.mintick) + "." + ATLAS_DIV, force_overlay = true)
+            if showDivLine
+                line.new(prevPhIdx, prevPhPrice, pivIdx, pxH, color = color.new(colDn, 45), style = line.style_dotted, width = 1, force_overlay = true)
+            if showWalls and barstate.isconfirmed
+                addWall(pivIdx, pxH, math.max(open[pivRight], close[pivRight]), -1)
+    if showOscP and bearDiv and bar_index == lastBearBar and not na(prevPhOsc)
+        line.new(prevPhIdx, prevPhOsc, pivIdx, ph, color = colDn, width = 2)
+    prevPhOsc   := ph
+    prevPhPrice := pxH
+    prevPhIdx   := pivIdx
+if not na(pl)
+    pxL = low[pivRight]
+    if not na(prevPlOsc) and pl > prevPlOsc and pxL < prevPlPrice and close >= pxL and (maxGap == 0 or pivIdx - prevPlIdx <= maxGap)
+        int dvF = 1 + (pl <= -exhLevel ? 1 : 0) + (osc > signalLine ? 1 : 0)
+        if dvF >= minForce
+            bullDiv       := true
+            lastBullBar   := bar_index
+            lastBullPx    := pxL
+            lastBullForce := dvF
+            bullValid     := true
+            if showDiv
+                label.new(pivIdx, pxL, "", yloc = yloc.belowbar, style = label.style_triangleup,
+                     size = dvF == 3 ? size.small : size.tiny, color = color.new(colUp, dvF == 1 ? 50 : dvF == 2 ? 15 : 0),
+                     tooltip = "Divergence haussière " + diamonds(dvF) + "\nCreux de prix plus bas (" + str.tostring(pxL, format.mintick) +
+                     " < " + str.tostring(prevPlPrice, format.mintick) + ") mais oscillateur plus haut.\nConfirmée " + str.tostring(pivRight) +
+                     " bougies après ce creux : pas de repeint.\nInvalide si une clôture passe sous " + str.tostring(pxL, format.mintick) + "." + ATLAS_DIV, force_overlay = true)
+            if showDivLine
+                line.new(prevPlIdx, prevPlPrice, pivIdx, pxL, color = color.new(colUp, 45), style = line.style_dotted, width = 1, force_overlay = true)
+            if showWalls and barstate.isconfirmed
+                addWall(pivIdx, pxL, math.min(open[pivRight], close[pivRight]), 1)
+    if showOscP and bullDiv and bar_index == lastBullBar and not na(prevPlOsc)
+        line.new(prevPlIdx, prevPlOsc, pivIdx, pl, color = colUp, width = 2)
+    prevPlOsc   := pl
+    prevPlPrice := pxL
+    prevPlIdx   := pivIdx
+
+if bearValid and (close > lastBearPx or bar_index - lastBearBar > vigil)
+    bearValid := false
+if bullValid and (close < lastBullPx or bar_index - lastBullBar > vigil)
+    bullValid := false
+
+if array.size(walls) > 0
+    for i = array.size(walls) - 1 to 0
+        Wall w = array.get(walls, i)
+        bool broken = barstate.isconfirmed and (w.dir == -1 ? close > w.top : close < w.bot)
+        bool expired = barstate.isconfirmed and bar_index - w.born > wallLife
+        if broken or expired
+            retireWall(i, broken ? "cassé" : "expiré")
+        else
+            box.set_right(w.bx, bar_index)
+            if barstate.isconfirmed and bar_index > w.born and (w.dir == -1 ? high >= w.bot and close < w.bot : low <= w.top and close > w.top)
+                w.hits := w.hits + 1
+                box.set_text(w.bx, wallName(w.dir) + " ×" + str.tostring(w.hits))
+
+// ─────────────────────────────── Trades virtuels ───────────────────────────────
+type Trade
+    int   dir
+    float sl
+    float entry
+    float stop
+    float ex
+    int   start
+    line  entryLn
+    array<chart.point> pts
+    int   al
+    bool  warned = false
+    int   warnBar
+    float tpWall
+    bool  tpHit = false
+    int   mode = 0
+    float tp
+    bool  half = false
+    float halfR = 0.0
+
+var array<Trade> trades  = array.new<Trade>()
+var array<Trade> pending = array.new<Trade>()
+var int   stN     = 0
+var int   stWin   = 0
+var float stSum   = 0.0
+var int   stNL    = 0
+var float stSumL  = 0.0
+var int   stNS    = 0
+var float stSumS  = 0.0
+var float stBest  = na
+var float stWorst = na
+var int   stFirst = na
+
+if array.size(pending) > 0
+    for p in pending
+        if (open - p.sl) * p.dir > 0
+            p.entry   := open
+            p.stop    := p.sl
+            p.mode    := exitModeE
+            p.tp      := open + p.dir * tpRE * ((open - p.sl) * p.dir)
+            p.start   := bar_index
+            p.entryLn := line.new(bar_index, open, bar_index, open, color = color.new(p.dir == 1 ? colUp : colDn, 55), style = line.style_dotted, width = 1, force_overlay = true)
+            p.pts     := array.from(chart.point.from_index(bar_index, p.sl))
+            array.push(trades, p)
+    array.clear(pending)
+
+if array.size(trades) > 0
+    for k = array.size(trades) - 1 to 0
+        t = array.get(trades, k)
+        s = t.dir
+        c = s == 1 ? colUp : colDn
+        float xp = na
+        string why = "stop"
+        float rk = (t.entry - t.sl) * s
+        bool  tgtOn = t.mode == 1 or (t.mode == 2 and not t.half)
+        float halfPx = na
+        if (open - t.stop) * s <= 0 and bar_index > t.start
+            xp := open
+        else
+            if tgtOn and bar_index > t.start and (open - t.tp) * s > 0
+                if t.mode == 1
+                    xp  := open
+                    why := "objectif"
+                else
+                    halfPx := open
+                    tgtOn  := false
+            if na(xp) and (s == 1 ? low <= t.stop : high >= t.stop)
+                xp := t.stop
+            if na(xp) and tgtOn and (s == 1 ? high >= t.tp : low <= t.tp)
+                if t.mode == 1
+                    xp  := t.tp
+                    why := "objectif"
+                else
+                    halfPx := t.tp
+        if not na(halfPx)
+            t.half  := true
+            t.halfR := (halfPx - t.entry) * s / rk
+            if showHist
+                label.new(bar_index, halfPx, "½", style = label.style_none, textcolor = s == 1 ? upTxt : dnTxt, size = size.tiny,
+                     tooltip = "Moitié du trade virtuel fermée à l'objectif : " + str.tostring(t.halfR, "+0.00;-0.00") + " R ; l'autre moitié suit le stop suiveur.", force_overlay = true)
+        if not na(xp)
+            line.delete(t.entryLn)
+            float r0 = (xp - t.entry) * s / rk
+            float r  = t.mode == 2 and t.half ? 0.5 * (t.halfR + r0) : r0
+            stN     += 1
+            stWin   += r > 0 ? 1 : 0
+            stSum   += r
+            stBest  := na(stBest) ? r : math.max(stBest, r)
+            stWorst := na(stWorst) ? r : math.min(stWorst, r)
+            stFirst := na(stFirst) ? time : stFirst
+            if s == 1
+                stNL   += 1
+                stSumL += r
+            else
+                stNS   += 1
+                stSumS += r
+            if showHist
+                win = r > 0
+                array.push(t.pts, chart.point.from_index(bar_index, t.mode == 1 ? t.sl : t.stop))
+                polyline.new(t.pts, line_color = win ? color.new(c, 40) : color.new(NEUTRE, 55), line_width = 1, force_overlay = true)
+                label.new(bar_index, xp, "", style = label.style_circle, size = size.tiny,
+                     color = win ? color.new(c, 10) : color.new(NEUTRE, 35),
+                     tooltip = (s == 1 ? "Achat" : "Vente") + " virtuel fermé " + (why == "objectif" ? "à l'objectif" : t.mode == 1 ? "au stop initial" : "au stop suiveur") +
+                     (t.mode == 2 and t.half ? " (moitié déjà fermée à l'objectif)" : "") + " · tenu " + str.tostring(bar_index - t.start) +
+                     " bougies · " + str.tostring(r, "+0.00;-0.00") + " R (brut)", force_overlay = true)
+            array.remove(trades, k)
+        else if t.mode != 1
+            t.ex := na(t.ex) ? (s == 1 ? high : low) : (s == 1 ? math.max(t.ex, high) : math.min(t.ex, low))
+            ns = t.ex - s * trailE * atr
+            if (ns - t.stop) * s > 0
+                array.push(t.pts, chart.point.from_index(bar_index + 1, t.stop))
+                array.push(t.pts, chart.point.from_index(bar_index + 1, ns))
+                t.stop := ns
+            if array.size(t.pts) > 9900
+                polyline.new(t.pts, line_color = color.new(c, 40), line_width = 1, force_overlay = true)
+                t.pts := array.from(array.last(t.pts))
+        if na(xp)
+            line.set_x2(t.entryLn, bar_index)
+
+bool tpNow = false
+if wallTP and array.size(trades) > 0
+    for t in trades
+        if not t.tpHit
+            float tg = nearestAhead(t.dir, t.entry)
+            t.tpWall := tg
+            if barstate.isconfirmed and not na(tg) and (t.dir == 1 ? high >= tg : low <= tg)
+                t.tpHit := true
+                tpNow   := true
+                float rr = (tg - t.entry) * t.dir / ((t.entry - t.sl) * t.dir)
+                label.new(bar_index, tg, "◎", style = label.style_label_center, color = color.new(color.black, 100),
+                     textcolor = t.dir == 1 ? upTxt : dnTxt, size = size.small,
+                     tooltip = "Mur atteint à " + str.tostring(tg, format.mintick) + " (" + str.tostring(rr, "#.0") + " R depuis l'entrée) : prise de profit partielle possible ; le trade virtuel continue au stop suiveur.", force_overlay = true)
+
+bool warnNow = false
+if warnTrades and (bearDiv or bullDiv) and array.size(trades) > 0
+    for t in trades
+        if not t.warned and ((bearDiv and t.dir == 1) or (bullDiv and t.dir == -1))
+            t.warned  := true
+            t.warnBar := bar_index
+            warnNow   := true
+            label.new(bar_index + 1, t.stop, "◆", style = label.style_none, textcolor = accTxt, size = size.tiny,
+                 tooltip = "Divergence contraire confirmée pendant ce trade. Information seulement.", force_overlay = true)
+
+var Trade  cand  = na
+var float  cEdge = na
+var box    cBox  = na
+var line   cLine = na
+var label  cLab  = na
+var string cTip  = ""
+var box    cWBox = na
+bool confNow = false
+int  confDir = 0
+int  sigDir  = 0
+if not na(cand) and barstate.isconfirmed
+    bool conf2 = (close - cEdge) * cand.dir > breakBufE * atr
+    if conf2 and okDecide(cand.dir)
+        array.push(pending, cand)
+        sigDir := cand.dir
+        confNow := true
+        confDir := cand.dir
+    else
+        box.set_bgcolor(cBox, color.new(cand.dir == 1 ? colUp : colDn, vis(94)))
+        box.set_border_color(cBox, color.new(cand.dir == 1 ? colUp : colDn, vis(85)))
+        box.set_border_style(cBox, line.style_dotted)
+        line.set_style(cLine, line.style_dotted)
+        label.set_textcolor(cLab, color.new(NEUTRE, 40))
+        label.set_tooltip(cLab, cTip + (conf2 ? "\nConfirmée, mais filtrée (EMA alignées ou séance) : pas de trade virtuel." : "\nNon confirmée : la bougie suivante n'a pas clôturé au-delà du bord, pas de trade virtuel."))
+        if not na(cWBox)
+            box.set_bgcolor(cWBox, color.new(cand.dir == 1 ? colUp : colDn, vis(98)))
+            box.set_border_color(cWBox, color.new(cand.dir == 1 ? colUp : colDn, vis(88)))
+    cand := na
+
+// ─────────────────────────────── Zones et cassures ───────────────────────────────
+bool useBody = zoneSrcE == "Corps"
+zHi = useBody ? math.max(open, close) : high
+zLo = useBody ? math.min(open, close) : low
+hh  = ta.highest(zHi, minBarsE)
+ll  = ta.lowest(zLo, minBarsE)
+wh  = ta.highest(high, minBarsE)
+wl  = ta.lowest(low, minBarsE)
+
+var bool  zActive = false
+var float zTop    = na
+var float zBot    = na
+var int   zStart  = na
+var int   lastEnd = -1
+var box   zBox    = na
+var float wTop    = na
+var float wBot    = na
+var box   wBox    = na
+int brkDir = 0
+bool brkBlocked = false
+
+if zActive
+    buf = breakBufE * atr
+    if close > zTop + buf or close < zBot - buf
+        dir  = close > zTop ? 1 : -1
+        c    = dir == 1 ? colUp : colDn
+        int al = agree(dir)
+        bool ema = emaAligned(dir)
+        int force = 3
+        edge = dir == 1 ? zTop : zBot
+        traded = (not trendOnlyE or na(tScore) or tScore * dir > 0) and okFloor
+        float slPx  = stopMidE ? (zTop + zBot) / 2 - dir * SL_BUF * atr : dir == 1 ? (useBody ? wBot : zBot) - SL_BUF * atr : (useBody ? wTop : zTop) + SL_BUF * atr
+        float risk  = (close - slPx) * dir
+        int   wb    = wallCue ? zoneWallBias(zTop, zBot) : 0
+        float ahead = wallCue ? nearestAhead(dir, close) : na
+        bool  wSup  = wb == dir
+        bool  wThr  = wb == -dir
+        bool  wBlk  = not na(ahead) and risk > 0 and (ahead - close) * dir < aheadR * risk
+        brkBlocked := wBlk
+        string wTip = wallCue ? "\nMurs : " + (wSup ? "▣ appui dans le sens de la cassure. " : "") +
+             (wThr ? "⊠ la cassure traverse le mur de la zone. " : "") +
+             (not na(ahead) ? (wBlk ? "⚠ " : "") + "mur devant à " + str.tostring(ahead, format.mintick) + (risk > 0 ? " (" + str.tostring((ahead - close) * dir / risk, "#.0") + " R)" : "") + "." : "aucun mur devant.") : ""
+        box.set_right(zBox, bar_index)
+        box.set_bgcolor(zBox, color.new(c, vis(fondTr(force))))
+        box.set_border_color(zBox, color.new(c, vis(math.min(bordTr(force) + 40, 85))))
+        box.set_border_style(zBox, line.style_solid)
+        edgeLn = line.new(zStart, edge, bar_index, edge, color = color.new(c, bordTr(force)), width = 2, force_overlay = true)
+        string tip = (dir == 1 ? "Cassure haussière" : "Cassure baissière") +
+             (showTrend ? " · tendance 1·3·12 m : " + arrow(t1) + arrow(t2) + arrow(t3) + (na(al) ? " (historique court)" : " (" + str.tostring(al) + "/3 dans le sens)") : "") +
+             (risk > 0 ? "\nTrade virtuel : stop initial " + str.tostring(slPx, format.mintick) + " · 1 R = " + str.tostring(risk, format.mintick) + " (" + str.tostring(risk / atr, "#.0") + " ATR)" : "") +
+             "\nEMA 50 / 200 alignées dans le sens de la cassure : " + (ema ? "oui (≡)" : "non") +
+             "\nAtlas (ACCBO-CUES) : EMA alignées +0,056 R ; tendance 3/3 contre 0/3 +0,084 R. Aucun ne rend AccBO rentable seul." +
+             (traded ? "" : not okFloor ? "\nPas de trade virtuel : marché fermé ou figé (ATR < 0,25 × sa médiane)." : "\nPas de trade virtuel : option « Trades seulement dans la tendance » activée.") +
+             (traded and confirm2E ? "\nConfirmation 2 clôtures : trade virtuel seulement si la bougie suivante clôture aussi au-delà du bord." : "") + wTip
+        edgeLb = label.new(zStart, edge, (dir == 1 ? "▲" : "▼") + (showTrend ? " " + dotsFor(dir) : "") + (ema ? "  ≡" : "") + (wSup ? "  ▣" : "") + (wThr ? "  ⊠" : "") + (wBlk ? "  ⚠" : ""),
+             style = dir == 1 ? label.style_label_lower_left : label.style_label_upper_left,
+             color = color.new(color.black, 100), textcolor = color.new(dir == 1 ? upTxt : dnTxt, math.min(bordTr(force), isDark ? 45 : 15)), size = txt,
+             tooltip = tip, force_overlay = true)
+        if traded
+            Trade tr = Trade.new(dir = dir, sl = slPx, al = al)
+            if confirm2E
+                cand  := tr
+                cEdge := edge
+                cBox  := zBox
+                cLine := edgeLn
+                cLab  := edgeLb
+                cTip  := tip
+                cWBox := useBody ? wBox : na
+            else if okDecide(dir)
+                array.push(pending, tr)
+                sigDir := dir
+            else
+                label.set_tooltip(edgeLb, tip + "\nFiltrée (EMA alignées ou séance) : pas de trade virtuel.")
+        if useBody
+            box.set_right(wBox, bar_index)
+            box.set_border_color(wBox, color.new(c, vis(65)))
+            box.set_bgcolor(wBox, color.new(c, vis(96)))
+        brkDir  := dir
+        zActive := false
+        lastEnd := bar_index
+    else
+        newTop = math.max(zTop, zHi)
+        newBot = math.min(zBot, zLo)
+        if newTop - newBot <= maxHeightE * atr
+            zTop := newTop
+            zBot := newBot
+        wTop := math.max(wTop, high)
+        wBot := math.min(wBot, low)
+        box.set_top(zBox, zTop)
+        box.set_bottom(zBox, zBot)
+        box.set_right(zBox, bar_index)
+        if useBody
+            box.set_top(wBox, wTop)
+            box.set_bottom(wBox, wBot)
+            box.set_right(wBox, bar_index)
+        if bar_index - zStart >= maxBarsE
+            zActive := false
+            lastEnd := bar_index
+            box.delete(zBox)
+            if useBody
+                box.delete(wBox)
+
+if not zActive and bar_index >= minBarsE
+    start = bar_index - minBarsE + 1
+    if start > lastEnd and hh - ll <= maxHeightE * atr
+        zActive := true
+        zTop    := hh
+        zBot    := ll
+        wTop    := wh
+        wBot    := wl
+        zStart  := start
+        if useBody
+            wBox := box.new(zStart, wTop, bar_index, wBot, border_color = color.new(colZ, vis(60)), border_width = 1,
+                 border_style = line.style_dotted, bgcolor = color.new(colZ, vis(95)), force_overlay = true)
+        zBox    := box.new(zStart, zTop, bar_index, zBot, border_color = color.new(colZ, 20), border_width = 1,
+             border_style = line.style_dashed, bgcolor = color.new(colZ, vis(86)), force_overlay = true)
+
+// ─────────────────────────────── Direction : lignes de tendance ───────────────────────────────
+color keyColD = isDark ? #94A3B8 : #64748B
+color dirCol = isDark ? colDir : (colDir == #E2E8F0 ? #334155 : colDir)
+max_bars_back(close, 2100)
+max_bars_back(high, 2100)
+max_bars_back(low, 2100)
+
+type TLine
+    line  ln
+    float slope
+    int   dir
+
+var array<TLine> tlAct  = array.new<TLine>()
+var array<line>  tlDead = array.new<line>()
+var float lph  = na
+var int   lphI = na
+var float lpl  = na
+var int   lplI = na
+
+tlAt(TLine t, int x) => line.get_y2(t.ln) + t.slope * (x - line.get_x2(t.ln))
+
+countSide(int d) =>
+    int n = 0
+    for t in tlAct
+        if t.dir == d
+            n += 1
+    n
+
+dropOldest(int d) =>
+    int idx = -1
+    for [i, t] in tlAct
+        if t.dir == d
+            idx := i
+            break
+    if idx >= 0
+        line.delete(array.get(tlAct, idx).ln)
+        array.remove(tlAct, idx)
+
+tlValid(int x0, float y0, float slope, int d) =>
+    bool ok = true
+    for k = x0 + 1 to bar_index
+        float y = y0 + slope * (k - x0)
+        float c = close[bar_index - k]
+        if (d == -1 and c > y) or (d == 1 and c < y)
+            ok := false
+            break
+    ok
+
+addTL(int x0, float y0, int x1, float y1, int d) =>
+    if x1 > x0 and x1 - x0 <= 1000
+        float slope = (y1 - y0) / (x1 - x0)
+        if tlValid(x0, y0, slope, d)
+            line l = line.new(x0, y0, x1, y1, color = color.new(dirCol, 15), width = 1, extend = extend.right, force_overlay = true)
+            array.push(tlAct, TLine.new(l, slope, d))
+            while countSide(d) > tlMax
+                dropOldest(d)
+
+tlPH = ta.pivothigh(high, tlLen, tlLen)
+tlPL = ta.pivotlow(low, tlLen, tlLen)
+if showTL
+    if barstate.isconfirmed and array.size(tlAct) > 0
+        for i = array.size(tlAct) - 1 to 0
+            TLine t = array.get(tlAct, i)
+            float y = tlAt(t, bar_index)
+            if (t.dir == -1 and close > y + breakBuf * atr) or (t.dir == 1 and close < y - breakBuf * atr)
+                if tlKeep > 0
+                    line.set_xy2(t.ln, bar_index, y)
+                    line.set_extend(t.ln, extend.none)
+                    line.set_style(t.ln, line.style_dotted)
+                    line.set_color(t.ln, color.new(dirCol, 55))
+                    label.new(bar_index, y, "✕", style = label.style_label_center, color = color.new(color.black, 100),
+                         textcolor = color.new(t.dir == -1 ? upTxt : dnTxt, 10), size = size.tiny,
+                         tooltip = (t.dir == -1 ? "Résistance cassée vers le haut" : "Support cassé vers le bas") + " (clôture au-delà ± la marge de cassure).", force_overlay = true)
+                    array.push(tlDead, t.ln)
+                    if array.size(tlDead) > 2 * tlKeep
+                        line.delete(array.shift(tlDead))
+                else
+                    line.delete(t.ln)
+                array.remove(tlAct, i)
+    if not na(tlPH)
+        int x = bar_index - tlLen
+        if not na(lph) and tlPH < lph
+            addTL(lphI, lph, x, tlPH, -1)
+        lph  := tlPH
+        lphI := x
+    if not na(tlPL)
+        int x = bar_index - tlLen
+        if not na(lpl) and tlPL > lpl
+            addTL(lplI, lpl, x, tlPL, 1)
+        lpl  := tlPL
+        lplI := x
+
+chPH = ta.pivothigh(high, chPiv, chPiv)
+chPL = ta.pivotlow(low, chPiv, chPiv)
+var int   zA_i = na
+var int   zB_i = na
+var float zB_p = na
+var int   zB_t = 0
+var float zH_prev = na
+var float zL_prev = na
+var float zH_last = na
+var float zL_last = na
+var array<label> zLab = array.new<label>(1)
+structTxt(int typ, float p) =>
+    typ == 1 ? (na(zH_prev) ? "H" : p > zH_prev ? "HH" : "LH") : (na(zL_prev) ? "L" : p > zL_prev ? "HL" : "LL")
+structLab(int x, float p, int typ, bool replace) =>
+    if showStruct
+        string tx = structTxt(typ, p)
+        bool bull = tx == "HH" or tx == "HL"
+        color tc = tx == "H" or tx == "L" ? keyColD : bull ? upTxt : dnTxt
+        string tip = (tx == "HH" ? "Sommet plus haut que le précédent" : tx == "LH" ? "Sommet plus bas que le précédent" : tx == "HL" ? "Creux plus haut que le précédent" : tx == "LL" ? "Creux plus bas que le précédent" : "Premier grand pivot") +
+             " (confirmé " + str.tostring(chPiv) + " bougies après)."
+        label lb = array.get(zLab, 0)
+        if replace and not na(lb)
+            label.set_xy(lb, x, p)
+            label.set_text(lb, tx)
+            label.set_textcolor(lb, tc)
+            label.set_tooltip(lb, tip)
+        else
+            array.set(zLab, 0, label.new(x, p, tx, style = typ == 1 ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100),
+                 textcolor = tc, size = size.small, tooltip = tip, force_overlay = true))
+if not na(chPH)
+    int x = bar_index - chPiv
+    if zB_t == 1
+        if chPH > zB_p
+            zB_i := x
+            zB_p := chPH
+            zH_last := chPH
+            structLab(x, chPH, 1, true)
+    else
+        zA_i := zB_i
+        zB_i := x
+        zB_p := chPH
+        zB_t := 1
+        zH_prev := zH_last
+        zH_last := chPH
+        structLab(x, chPH, 1, false)
+if not na(chPL)
+    int x = bar_index - chPiv
+    if zB_t == -1
+        if chPL < zB_p
+            zB_i := x
+            zB_p := chPL
+            zL_last := chPL
+            structLab(x, chPL, -1, true)
+    else
+        zA_i := zB_i
+        zB_i := x
+        zB_p := chPL
+        zB_t := -1
+        zL_prev := zL_last
+        zL_last := chPL
+        structLab(x, chPL, -1, false)
+
+var string dirTxt  = ""
+var color  dirTxtC = color.gray
+
+if barstate.islast
+    dirTxt := ""
+    float res = na
+    float sup = na
+    for t in tlAct
+        float y = tlAt(t, bar_index)
+        if t.dir == -1 and y >= close and (na(res) or y < res)
+            res := y
+        if t.dir == 1 and y <= close and (na(sup) or y > sup)
+            sup := y
+    if showTL
+        dirTxt += (dirTxt == "" ? "" : " · ") + "résistance " + (na(res) ? "—" : str.tostring(res, format.mintick)) + " · support " + (na(sup) ? "—" : str.tostring(sup, format.mintick))
+    dirTxtC := isDark ? #E2E8F0 : #0F172A
+
+// ─────────────────────────────── XAU zones majeures (OB + FVG des UT supérieures) ───────────────────────────────
+// Moteur exécuté dans l'UT supérieure : BOS d'un swing majeur avec corps >= 1 ATR → OB (dernière bougie contraire
+// dans les 10 précédentes) ; FVG >= 0,2 ATR. Zone retirée à la clôture au-delà de son bord lointain ou à expiration.
+// Renvoie la zone haussière ouverte la plus proche (sous / dans le prix) et la baissière (au-dessus / dans le prix),
+// lues sur la bougie CLÔTURÉE ([1] + lookahead_on) : pas de repeint.
+fMaj(int sw) =>
+    float a  = ta.atr(14)
+    float pH = ta.pivothigh(high, sw, sw)
+    float pL = ta.pivotlow(low, sw, sw)
+    var float sh = na
+    var float sl = na
+    var array<float> zT = array.new_float()
+    var array<float> zB = array.new_float()
+    var array<int>   zD = array.new_int()
+    var array<int>   zK = array.new_int()
+    var array<int>   zI = array.new_int()
+    if not na(pH)
+        sh := pH
+    if not na(pL)
+        sl := pL
+    int n = array.size(zT)
+    if n > 0
+        for i = n - 1 to 0
+            int d = array.get(zD, i)
+            if (d == 1 ? close < array.get(zB, i) : close > array.get(zT, i)) or bar_index - array.get(zI, i) > xExp
+                array.remove(zT, i)
+                array.remove(zB, i)
+                array.remove(zD, i)
+                array.remove(zK, i)
+                array.remove(zI, i)
+    float gMin = na(a) ? na : math.max(0.2 * a, syminfo.mintick)
+    if xFvg and not na(gMin) and bar_index >= 2
+        if low - high[2] >= gMin
+            array.push(zT, low)
+            array.push(zB, high[2])
+            array.push(zD, 1)
+            array.push(zK, 1)
+            array.push(zI, bar_index)
+        if low[2] - high >= gMin
+            array.push(zT, low[2])
+            array.push(zB, high)
+            array.push(zD, -1)
+            array.push(zK, 1)
+            array.push(zI, bar_index)
+    bool big = not na(a) and math.abs(close - open) >= a
+    if not na(sh) and close > sh
+        sh := na
+        if big and close > open
+            for i = 1 to 10
+                if close[i] < open[i]
+                    array.push(zT, high[i])
+                    array.push(zB, low[i])
+                    array.push(zD, 1)
+                    array.push(zK, 0)
+                    array.push(zI, bar_index)
+                    break
+    if not na(sl) and close < sl
+        sl := na
+        if big and close < open
+            for i = 1 to 10
+                if close[i] > open[i]
+                    array.push(zT, high[i])
+                    array.push(zB, low[i])
+                    array.push(zD, -1)
+                    array.push(zK, 0)
+                    array.push(zI, bar_index)
+                    break
+    float bT = na
+    float bB = na
+    int   bK = 0
+    float sT = na
+    float sB = na
+    int   sK = 0
+    int m = array.size(zT)
+    if m > 0
+        for i = 0 to m - 1
+            float t = array.get(zT, i)
+            float b = array.get(zB, i)
+            if array.get(zD, i) == 1 and b <= close and (na(bT) or t > bT)
+                bT := t
+                bB := b
+                bK := array.get(zK, i)
+            if array.get(zD, i) == -1 and t >= close and (na(sB) or b < sB)
+                sT := t
+                sB := b
+                sK := array.get(zK, i)
+    [bT[1], bB[1], bK[1], sT[1], sB[1], sK[1]]
+
+[x1bT, x1bB, x1bK, x1sT, x1sB, x1sK] = request.security(syminfo.tickerid, xTf1, fMaj(xSw), lookahead = barmerge.lookahead_on)
+[x2bT, x2bB, x2bK, x2sT, x2sB, x2sK] = request.security(syminfo.tickerid, xTf2, fMaj(xSw), lookahead = barmerge.lookahead_on)
+
+var array<box>  xBx = array.new<box>()
+var array<line> xLn = array.new<line>()
+xDraw(float t, float b, int k, int d, string tf, int w) =>
+    if not na(t) and not na(b)
+        color c = d == 1 ? colUp : colDn
+        string nm = (k == 1 ? "FVG" : "OB") + (d == 1 ? "+ " : "− ") + tf
+        array.push(xBx, box.new(bar_index - 40, t, bar_index + 12, b, border_color = color.new(c, 10), border_width = w,
+             bgcolor = color.new(c, 80), text = nm, text_size = size.small, text_color = d == 1 ? upTxt : dnTxt,
+             text_halign = text.align_right, text_valign = text.align_top, extend = extend.left, force_overlay = true))
+        if xMid
+            array.push(xLn, line.new(bar_index - 40, (t + b) / 2, bar_index + 12, (t + b) / 2, color = color.new(c, 30),
+                 style = line.style_dashed, extend = extend.left, force_overlay = true))
+
+if barstate.islast
+    for bx in xBx
+        box.delete(bx)
+    for ln in xLn
+        line.delete(ln)
+    array.clear(xBx)
+    array.clear(xLn)
+    if showX
+        if timeframe.in_seconds(xTf1) > tfSec
+            xDraw(x1bT, x1bB, x1bK, 1, xTf1, 2)
+            xDraw(x1sT, x1sB, x1sK, -1, xTf1, 2)
+        if timeframe.in_seconds(xTf2) > tfSec
+            xDraw(x2bT, x2bB, x2bK, 1, xTf2, 3)
+            xDraw(x2sT, x2sB, x2sK, -1, xTf2, 3)
+
+// ─────────────────────────────── Dessins « en direct » (dernière bougie) ───────────────────────────────
+var array<polyline> livePl = array.new<polyline>()
+var array<label>    liveLb = array.new<label>()
+var array<line>     liveLn = array.new<line>()
+
+if barstate.islast
+    for poly in livePl
+        polyline.delete(poly)
+    for lb in liveLb
+        label.delete(lb)
+    for ln in liveLn
+        line.delete(ln)
+    array.clear(livePl)
+    array.clear(liveLb)
+    array.clear(liveLn)
+    int nT = array.size(trades)
+    if nT > 0
+        array<float> seen = array.new<float>()
+        for k = math.max(0, nT - 45) to nT - 1
+            t = array.get(trades, k)
+            c = t.dir == 1 ? colUp : colDn
+            cT = t.dir == 1 ? upTxt : dnTxt
+            float key = t.dir * math.round(t.stop / syminfo.mintick)
+            bool first = not array.includes(seen, key)
+            int  nSame = 0
+            bool anyW  = false
+            if first
+                array.push(seen, key)
+                for u in trades
+                    if u.dir == t.dir and u.dir * math.round(u.stop / syminfo.mintick) == key
+                        nSame += 1
+                        anyW := anyW or u.warned
+            pts = array.copy(t.pts)
+            array.push(pts, chart.point.from_index(bar_index + 1, t.stop))
+            if first and k >= nT - 30
+                array.push(livePl, polyline.new(pts, line_color = anyW ? color.new(colAcc, 72) : color.new(c, 82), line_width = 6, force_overlay = true))
+            array.push(livePl, polyline.new(pts, line_color = c, line_width = 2, force_overlay = true))
+            if first and t.mode != 0 and not t.half
+                array.push(liveLn, line.new(bar_index + 1, t.tp, bar_index + 3, t.tp, color = color.new(c, 20), style = line.style_dashed, width = 1, force_overlay = true))
+                array.push(liveLb, label.new(bar_index + 3, t.tp, "objectif " + str.tostring(t.tp, format.mintick) + " · " + str.tostring(tpRE, "#.#") + " R" + (t.mode == 2 ? " (moitié)" : ""),
+                     style = label.style_label_left, color = color.new(color.black, 100), textcolor = cT, size = txt,
+                     tooltip = "Objectif du trade virtuel (" + exitName(t.mode) + ").", force_overlay = true))
+            if first
+                array.push(liveLn, line.new(bar_index + 1, t.stop, bar_index + 3, t.stop, color = color.new(c, 30), style = line.style_dotted, width = 1, force_overlay = true))
+                array.push(liveLb, label.new(bar_index + 3, t.stop, (anyW ? "◆ " : "") + "stop " + str.tostring(t.stop, format.mintick) +
+                     (nSame > 1 ? " · ×" + str.tostring(nSame) : ""),
+                     style = label.style_label_left, color = color.new(color.black, 100), textcolor = anyW ? accTxt : cT, size = txt,
+                     tooltip = (nSame > 1 ? str.tostring(nSame) + " trades au même stop ; détail du plus ancien affiché.\n" : "") +
+                     (t.dir == 1 ? "Achat" : "Vente") + " virtuel · entrée " + str.tostring(t.entry, format.mintick) + " · ouvert depuis " +
+                     str.tostring(bar_index - t.start) + " bougies" +
+                     " · R latent " + str.tostring((close - t.entry) * t.dir / ((t.entry - t.sl) * t.dir), "+0.00;-0.00") + " · le stop assure " + str.tostring((t.stop - t.entry) * t.dir / ((t.entry - t.sl) * t.dir), "+0.00;-0.00") + " R" +
+                     "\nSortie : " + exitName(t.mode) + (t.mode != 0 ? " · objectif " + str.tostring(t.tp, format.mintick) + (t.half ? " (moitié déjà fermée)" : "") : "") + (t.mode != 1 ? " ; le stop suiveur vaut pour la bougie suivante." : " ; stop initial fixe."), force_overlay = true))
+    if wallTP and nT > 0
+        array<float> seenTp = array.new<float>()
+        for t in trades
+            if not t.tpHit and not na(t.tpWall)
+                float kTp = t.dir * math.round(t.tpWall / syminfo.mintick)
+                if not array.includes(seenTp, kTp)
+                    array.push(seenTp, kTp)
+                    int nTp = 0
+                    for u in trades
+                        if not u.tpHit and not na(u.tpWall) and u.dir * math.round(u.tpWall / syminfo.mintick) == kTp
+                            nTp += 1
+                    float rr = (t.tpWall - t.entry) * t.dir / ((t.entry - t.sl) * t.dir)
+                    cTp = t.dir == 1 ? upTxt : dnTxt
+                    array.push(liveLn, line.new(bar_index + 1, t.tpWall, bar_index + 3, t.tpWall, color = color.new(t.dir == 1 ? colUp : colDn, 20), style = line.style_dashed, width = 1, force_overlay = true))
+                    array.push(liveLb, label.new(bar_index + 3, t.tpWall, "TP mur " + str.tostring(t.tpWall, format.mintick) + " · " + str.tostring(rr, "#.0") + " R" + (nTp > 1 ? " · ×" + str.tostring(nTp) : ""),
+                         style = label.style_label_left, color = color.new(color.black, 100), textcolor = cTp, size = txt, force_overlay = true))
+    if zActive
+        bufNow = breakBufE * atr
+        array.push(liveLb, label.new(bar_index + 1, zTop, "▲ " + str.tostring(zTop + bufNow, format.mintick), style = label.style_label_left,
+             color = color.new(color.black, 100), textcolor = color.new(upTxt, 15), size = size.tiny, force_overlay = true))
+        array.push(liveLb, label.new(bar_index + 1, zBot, "▼ " + str.tostring(zBot - bufNow, format.mintick), style = label.style_label_left,
+             color = color.new(color.black, 100), textcolor = color.new(dnTxt, 15), size = size.tiny, force_overlay = true))
+
+// ─────────────────────────────── Signaux de retournement sur le prix ───────────────────────────────
+color ribCol = na(osc) ? color(na) : osc >= 0 ? color.from_gradient(osc, 0, exhLevel * 1.5, color.new(colUp, 92), color.new(colUp, 5)) :
+     color.from_gradient(osc, -exhLevel * 1.5, 0, color.new(colDn, 5), color.new(colDn, 92))
+plotshape(showRibbon, title = "Ruban de pression", style = shape.square, location = location.bottom, color = ribCol, size = size.tiny, display = display.pane, force_overlay = true)
+plotshape(showOscP and showExh and exhTop ? osc : na, title = "Essoufflement (panneau) haut", style = shape.circle, location = location.absolute, color = colAcc, size = size.tiny)
+plotshape(showOscP and showExh and exhBot ? osc : na, title = "Essoufflement (panneau) bas", style = shape.circle, location = location.absolute, color = colAcc, size = size.tiny)
+plotshape(showExh and exhTop, title = "Essoufflement en haut", style = shape.circle, location = location.abovebar, color = color.new(colAcc, 30), size = size.tiny, display = display.pane, force_overlay = true)
+plotshape(showExh and exhBot, title = "Essoufflement en bas", style = shape.circle, location = location.belowbar, color = color.new(colAcc, 30), size = size.tiny, display = display.pane, force_overlay = true)
+bool crossDn = showCross and barstate.isconfirmed and xDn and not exhTop
+bool crossUp = showCross and barstate.isconfirmed and xUp and not exhBot
+plotshape(crossDn, title = "Croisement vers le bas", style = shape.circle, location = location.abovebar, color = color.new(NEUTRE, 40), size = size.tiny, display = display.pane, force_overlay = true)
+plotshape(crossUp, title = "Croisement vers le haut", style = shape.circle, location = location.belowbar, color = color.new(NEUTRE, 40), size = size.tiny, display = display.pane, force_overlay = true)
+plotshape(showOscP and (crossDn or crossUp) ? osc : na, title = "Croisement (panneau)", style = shape.circle, location = location.absolute, color = color.new(NEUTRE, 20), size = size.tiny)
+plotshape(showDiv and bearDiv, title = "Divergence confirmée (baissière)", style = shape.triangledown, location = location.abovebar, color = color.new(colDn, 65), size = size.tiny, display = display.pane, force_overlay = true)
+plotshape(showDiv and bullDiv, title = "Divergence confirmée (haussière)", style = shape.triangleup, location = location.belowbar, color = color.new(colUp, 65), size = size.tiny, display = display.pane, force_overlay = true)
+
+// ─────────────────────────────── Bougies ───────────────────────────────
+bool  inZone    = zActive and brkDir == 0
+color brightCol = brkDir == 1 ? colUp : colDn
+color calmCol   = isDark ? color.new(#64748B, 10) : color.new(#9AA5B5, 0)
+color paletteCol = close >= open ? color.new(colUp, isDark ? 30 : 0) : color.new(colDn, isDark ? 30 : 0)
+color presCol   = na(osc) ? color(na) : osc >= 0 ? color.from_gradient(osc, 0, exhLevel * 1.5, color.new(NEUTRE, 30), color.new(colUp, 0)) :
+     color.from_gradient(osc, -exhLevel * 1.5, 0, color.new(colDn, 0), color.new(NEUTRE, 30))
+color candleCol = switch candleMode
+    "Natives"         => color(na)
+    "Zone et cassure" => brkDir != 0 ? brightCol : inZone ? calmCol : color(na)
+    "Palette AccBO"   => brkDir != 0 ? brightCol : inZone ? calmCol : paletteCol
+    => presCol
+barcolor(candleCol, title = "Bougies AccBO")
+
+// ─────────────────────────────── Panneau ───────────────────────────────
+posOf(string p) => p == "En bas à droite" ? position.bottom_right : p == "En haut à gauche" ? position.top_left : p == "En bas à gauche" ? position.bottom_left : position.top_right
+plur(int n, string w) => str.tostring(n) + " " + w + (n > 1 ? "s" : "")
+fmtR(float x) => na(x) ? "—" : str.tostring(x, "+0.00;-0.00") + " R"
+px(float x) => str.tostring(x, format.mintick)
+keyCol = isDark ? #94A3B8 : #64748B
+valCol = isDark ? #E2E8F0 : #0F172A
+var table tb = showPanel ? table.new(posOf(panelPos), 2, 11, bgcolor = isDark ? color.new(#0B1220, 12) : color.new(#FFFFFF, 8),
+     frame_color = isDark ? #1E293B : #E2E8F0, frame_width = 1, border_color = isDark ? color.new(#1E293B, 40) : color.new(#E2E8F0, 40), border_width = 1, force_overlay = true) : table(na)
+row(int r, string k, string v, color c, string tip = "") =>
+    table.cell(tb, 0, r, k, text_color = keyCol, text_size = txt, text_halign = text.align_left, tooltip = tip)
+    table.cell(tb, 1, r, v, text_color = c, text_size = txt, text_halign = text.align_right, tooltip = tip)
+
+string TIP_POT = "Prix de déclenchement (clôture au-delà du bord ± la marge), stop initial du trade virtuel et valeur de 1 R en prix.\nmoy. = R moyen des trades virtuels fermés dans ce sens sur ce graphique (brut, sans frais) ; entre parenthèses, leur nombre."
+string TIP_ST  = "Trades virtuels FERMÉS de ce graphique, sur l'historique chargé, avec les réglages actuels. R brut : sans spread, commission ni swap.\nAtlas : AccBO n'a pas d'avantage démontré après frais (ACCBO-BASE)."
+
+potRow(int r, int d) =>
+    float mR = d == 1 ? (stNL > 0 ? stSumL / stNL : na) : (stNS > 0 ? stSumS / stNS : na)
+    int   mN = d == 1 ? stNL : stNS
+    string hist = na(mR) ? "aucun trade passé" : "moy. " + fmtR(mR) + " (" + str.tostring(mN) + ")"
+    string v = ""
+    color  c = d == 1 ? upTxt : dnTxt
+    if not na(cand)
+        if cand.dir == d
+            float trig = cEdge + d * breakBufE * atr
+            float rk   = (trig - cand.sl) * d
+            v := "en attente : clôture " + (d == 1 ? "> " : "< ") + px(trig) + " · stop " + px(cand.sl) + " · 1 R = " + px(rk) + " · " + hist
+        else
+            v := "—"
+            c := keyCol
+    else if zActive
+        float trig = d == 1 ? zTop + breakBufE * atr : zBot - breakBufE * atr
+        float sl   = stopMidE ? (zTop + zBot) / 2 - d * SL_BUF * atr : d == 1 ? (useBody ? wBot : zBot) - SL_BUF * atr : (useBody ? wTop : zTop) + SL_BUF * atr
+        float rk   = (trig - sl) * d
+        v := (d == 1 ? "> " : "< ") + px(trig) + " · stop " + px(sl) + " · 1 R = " + px(rk) + " (" + str.tostring(rk / atr, "#.0") + " ATR) · " + hist
+    else
+        v := "pas de zone · " + hist
+        c := keyCol
+    row(r, d == 1 ? "Cassure ▲" : "Cassure ▼", v, c, TIP_POT)
+
+if barstate.islast and showPanel
+    table.cell(tb, 0, 0, "AccBO", text_color = color.white, text_size = txt, bgcolor = color.new(colZ, isDark ? 30 : 0), text_halign = text.align_left)
+    table.cell(tb, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, text_size = txt, bgcolor = color.new(colZ, isDark ? 30 : 0), text_halign = text.align_right)
+    potRow(1, 1)
+    potRow(2, -1)
+    int   nL = 0
+    int   nS = 0
+    float lat = 0.0
+    float lock = 0.0
+    for t in trades
+        float rk = (t.entry - t.sl) * t.dir
+        if t.dir == 1
+            nL += 1
+        else
+            nS += 1
+        float rL = (close - t.entry) * t.dir / rk
+        float rS = ((t.mode == 1 ? t.sl : t.stop) - t.entry) * t.dir / rk
+        lat  += t.half ? 0.5 * (t.halfR + rL) : rL
+        lock += t.half ? 0.5 * (t.halfR + rS) : rS
+    if nL + nS == 0
+        row(3, "Positions ouvertes", "aucune", keyCol)
+    else
+        row(3, "Positions ouvertes", (nL > 0 ? plur(nL, "achat") : "") + (nL > 0 and nS > 0 ? " · " : "") + (nS > 0 ? plur(nS, "vente") : "") +
+             " · latent " + fmtR(lat) + " · stop assure " + fmtR(lock), lat >= 0 ? upTxt : dnTxt,
+             "R latent = gain ou perte à la clôture actuelle, en R de chaque trade, additionnés. Stop assure = R garanti si tous les stops suiveurs sont touchés. Brut, sans frais.")
+    if stN == 0
+        row(4, "Trades fermés", "aucun sur l'historique chargé", keyCol, TIP_ST)
+    else
+        float avg = stSum / stN
+        row(4, "Trades fermés", str.tostring(stN) + " depuis le " + str.format_time(stFirst, "dd/MM/yyyy", syminfo.timezone), valCol, TIP_ST)
+        row(5, "Gagnants · perdants", str.tostring(100.0 * stWin / stN, "#") + " % · " + str.tostring(100.0 * (stN - stWin) / stN, "#") + " %  (" +
+             str.tostring(stWin) + " · " + str.tostring(stN - stWin) + ")", valCol, TIP_ST)
+        row(6, "R moyen par trade", fmtR(avg) + " · total " + str.tostring(stSum, "+0.0;-0.0") + " R", avg > 0 ? upTxt : avg < 0 ? dnTxt : valCol, TIP_ST)
+        row(7, "Meilleur · pire", fmtR(stBest) + " · " + fmtR(stWorst), valCol, TIP_ST)
+    string setTxt = (zoneSrcE == "Corps" ? "corps" : "mèches") + " · " + str.tostring(minBarsE) + "-" + str.tostring(maxBarsE) + " bougies · haut. " +
+         str.tostring(maxHeightE, "#.#") + " · " + (confirm2E ? "2 clôtures" : "1 clôture") + " marge " + str.tostring(breakBufE, "#.##") + " · stop " +
+         (stopMidE ? "milieu" : "bord") + " · " + exitName(exitModeE) + (emaOnlyE ? " · ≡ seulement" : "") + (sessOnlyE and sessApplies ? " · séance" : "") +
+         (trendOnlyE ? " · tendance" : "") + (closedFloorE ? " · plancher" : "")
+    row(9, "Réglage", setTxt, keyCol, "Réglages actuels (champs Zone, Filtres, Tendance, Sortie).")
+    if dirTxt != ""
+        row(8, "Direction", dirTxt, dirTxtC, "Lignes de tendance actives les plus proches au-dessus (résistance) et au-dessous (support) du prix. Aide visuelle.")
+    if showX
+        string xTxt = (na(x1bT) ? "" : (x1bK == 1 ? "FVG+ " : "OB+ ") + xTf1 + " " + px(x1bB) + "-" + px(x1bT) + "  ") +
+             (na(x1sT) ? "" : (x1sK == 1 ? "FVG− " : "OB− ") + xTf1 + " " + px(x1sB) + "-" + px(x1sT) + "  ") +
+             (na(x2bT) ? "" : (x2bK == 1 ? "FVG+ " : "OB+ ") + xTf2 + " " + px(x2bB) + "-" + px(x2bT) + "  ") +
+             (na(x2sT) ? "" : (x2sK == 1 ? "FVG− " : "OB− ") + xTf2 + " " + px(x2sB) + "-" + px(x2sT))
+        row(10, "Zones majeures", xTxt == "" ? "aucune" : xTxt, valCol, "Zones OB / FVG ouvertes les plus proches du prix sur les UT supérieures (bougies clôturées). Ajout non testé.")
+
+// ─────────────────────────────── Sortie « Signal AccBO » ───────────────────────────────
+plot(sigDir == 1 ? 1 : 0, "Signal AccBO achat", color = colUp, display = display.data_window, force_overlay = true)
+plot(sigDir == -1 ? 1 : 0, "Signal AccBO vente", color = colDn, display = display.data_window, force_overlay = true)
+
+// ─────────────────────────────── Alertes ───────────────────────────────
+bool xTouch = showX and ((not na(x1bT) and low <= x1bT and close >= x1bB) or (not na(x2bT) and low <= x2bT and close >= x2bB) or
+     (not na(x1sB) and high >= x1sB and close <= x1sT) or (not na(x2sB) and high >= x2sB and close <= x2sT))
+alertcondition(brkDir == 1, "Cassure haussière AccBO", "AccBO : cassure haussière sur {{ticker}} {{interval}}")
+alertcondition(brkDir == -1, "Cassure baissière AccBO", "AccBO : cassure baissière sur {{ticker}} {{interval}}")
+alertcondition(confDir == 1, "Cassure haussière confirmée (2 clôtures)", "AccBO : cassure haussière confirmée par une 2e clôture sur {{ticker}} {{interval}}")
+alertcondition(confDir == -1, "Cassure baissière confirmée (2 clôtures)", "AccBO : cassure baissière confirmée par une 2e clôture sur {{ticker}} {{interval}}")
+alertcondition(bullDiv, "Divergence haussière confirmée", "AccBO : divergence haussière confirmée sur {{ticker}} {{interval}}")
+alertcondition(bearDiv, "Divergence baissière confirmée", "AccBO : divergence baissière confirmée sur {{ticker}} {{interval}}")
+alertcondition(warnNow, "Trade virtuel sous divergence contraire", "AccBO : divergence contraire sur un trade virtuel ouvert, {{ticker}} {{interval}}")
+alertcondition(tpNow, "Mur atteint par un trade virtuel", "AccBO : un trade virtuel atteint son TP mur sur {{ticker}} {{interval}}")
+alertcondition(brkBlocked, "Cassure avec un mur devant", "AccBO : cassure avec un mur à moins de 1 R devant sur {{ticker}} {{interval}}")
+alertcondition(exhTop or exhBot, "Essoufflement", "AccBO : essoufflement de l'oscillateur sur {{ticker}} {{interval}}")
+alertcondition(xTouch, "Prix dans une zone majeure", "AccBO : prix dans une zone majeure OB/FVG sur {{ticker}} {{interval}}")
